@@ -1,0 +1,281 @@
+esphome:
+  name: heizung
+
+esp8266:
+  board: d1_mini
+
+logger:
+  level: VERBOSE #makes uart stream available in esphome logstream
+  baud_rate: 0 #disable logging over uart
+
+# Enable Home Assistant API
+api:
+
+ota:
+  password: "597f08c5ad62dfcf0ddcc230b93b8e23"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Heizung Fallback Hotspot"
+    password: "NdGlzYlDTauQ"
+
+uart:
+  id: uart_bus
+  tx_pin: 1
+  rx_pin: 3
+  baud_rate: 9600
+  debug:
+    direction: RX
+    dummy_receiver: true
+    after:
+      delimiter: "\x21\x0a\x0a"
+#      bytes: 25000
+
+    sequence:
+      - lambda: |-
+          //Debug all
+          //UARTDebug::log_hex(direction, bytes, ' ');
+          
+          size_t bytes_length = bytes.size();
+
+          uint8_t delimiter[] = {0x21, 0x0A, 0x0A};
+          size_t delimiter_length = sizeof(delimiter) / sizeof(delimiter[0]);
+
+          //Convert delimiter to vector
+          std::vector<uint8_t> data(delimiter, delimiter + delimiter_length);
+
+          //add bytes to vector (except last 2 bytes (checksum))
+          for(int i = 0; i< bytes_length-2; i++){
+            data.push_back(bytes[i]);
+          }
+         
+          //CRC-16 KERMIT
+          const uint16_t poly = 0x1021;
+          uint16_t crc = 0x0000;
+
+          for (size_t index = 0; index < data.size(); index++) {
+              uint8_t byte = data[index];
+
+              // Reverse the bits of the byte
+              byte = (byte & 0xF0) >> 4 | (byte & 0x0F) << 4;
+              byte = (byte & 0xCC) >> 2 | (byte & 0x33) << 2;
+              byte = (byte & 0xAA) >> 1 | (byte & 0x55) << 1;
+
+              for (int i = 0; i < 8; i++) {
+                  bool topBitSet = crc & 0x8000;
+                  if (byte & 0x80) {
+                      topBitSet = !topBitSet; // Toggle if data bit is set
+                  }
+                  crc <<= 1;
+                  if (topBitSet) {
+                      crc ^= poly;
+                  }
+                  byte <<= 1;
+              }
+          }
+
+          // Reverse the bits of the final CRC
+          uint16_t reversedCRC = 0;
+          for (int i = 0; i < 16; i++) {
+              reversedCRC |= ((crc >> i) & 1) << (15 - i);
+          }
+          
+          uint16_t checksum = (bytes[bytes_length-1]<<8 | bytes[bytes_length-2]);
+          //ESP_LOGD("custom", "RC Check should be 0x%04X: 0x%02X", checksum, reversedCRC);
+          
+          if(checksum == reversedCRC){
+            UARTDebug::log_hex(direction, bytes, ' ');
+          
+
+
+
+            // Sammelinfo?
+            if(bytes[0]==0xBD && bytes[1]==0x1){
+                float unknown = (u8)bytes[6];
+                ESP_LOGD("custom", "unbekannt?: %f", unknown);
+
+                float unknown1 = (u8)bytes[7];
+                ESP_LOGD("custom", "unbekannt?: %f", unknown1);
+
+                float burnermixmin = (u8)bytes[12];
+                ESP_LOGD("custom", "Burner-Mix Temperature Min?: %f", burnermixmin/10);
+
+                float burnermode = (u8)bytes[13];
+                ESP_LOGD("custom", "burner mode?: %f", burnermode);
+
+                float unknown2 = (u8)bytes[14];
+                ESP_LOGD("custom", "unbekannt?: %f", unknown2);
+
+                float unknown3 = (u8)bytes[15];
+                ESP_LOGD("custom", "unbekannt?: %f", unknown3);
+
+                float burnerMixTargetTemp = ((uint16_t)(bytes[43]<<8 | bytes[42]));
+                ESP_LOGD("custom", "Burner-Mix Target Temp: %f", burnerMixTargetTemp/10);
+            }
+
+            //Total Burner Starts
+            if(bytes[0]==0x0B && bytes[1]==0x5){
+                int32 totalBurnerStarts = (uint32_t)(bytes[6]<<16 | bytes[5]<<8 | bytes[4]);
+                id(totalBurnerStart).publish_state( totalBurnerStarts );
+            }  
+
+            //Burner Status
+            if(bytes[0]==0xBD && bytes[1]==0x1){
+                int burnerStatusValue = (int8)(bytes[14]);
+
+                id(burnerStatus).publish_state( burnerStatusValue );
+            }  
+
+            //Burner Mode
+            if(bytes[0]==0xC2 && bytes[1]==0x1){
+                int burnerModeValue = (int8)(bytes[13]);
+                switch(burnerModeValue){
+                  case 0: id(burnerMode).publish_state( "Aus" );
+                  case 1: id(burnerMode).publish_state( "Wärme" );
+                  case 2: id(burnerMode).publish_state( "Wasser" );
+                }
+            }  
+
+             //Außenfühler
+            if(bytes[0]==0x1C && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureOutside).publish_state( sensorTemp/10 );
+            }  
+
+            //Heißwasser
+            if(bytes[0]==0x1F && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureHotWater).publish_state( sensorTemp/10 );
+            }  
+
+            //Heizung Temperatur Kessel
+            if(bytes[0]==0x1D && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureBurner).publish_state( sensorTemp/10 );
+            }  
+
+            //Heizung Vorlauftemperatur
+            if(bytes[0]==0x1E && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureMixCircuitFLow).publish_state( sensorTemp/10 );
+            }  
+
+            //Solar Temperatur Puffer
+            if(bytes[0]==0x23 && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureKSPF).publish_state( sensorTemp/10 );
+            }  
+
+            //Solar TemperaturVorlauf
+            if(bytes[0]==0x25 && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureKVLF).publish_state( sensorTemp/10 );
+            }  
+
+            //Solar Temperatur RÜcklauf
+            if(bytes[0]==0x21 && bytes[1]==0x2){
+                float sensorTemp = ((uint16_t)(bytes[5]<<8 | bytes[4]));
+                id(temperatureKRLF).publish_state( sensorTemp/10 );
+            }       
+          }
+
+
+sensor:
+  - platform: template
+    id: temperatureOutside
+    name: Heizung Temperatur Außenfühler
+    unit_of_measurement: "°C"
+    icon: "mdi:home-thermometer-outline"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: temperatureHotWater
+    name: Heizung Temperatur Heißwasser
+    unit_of_measurement: "°C"
+    icon: "mdi:water-boiler"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: temperatureBurner
+    name: Heizung Temperatur Kessel
+    unit_of_measurement: "°C"
+    icon: "mdi:meter-gas"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: temperatureMixCircuitFLow
+    name: Heizung Vorlauftemperatur
+    unit_of_measurement: "°C"
+    icon: "mdi:temperature-celsius"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: temperatureKSPF
+    name: Solar Temperatur Pufferspeicher
+    unit_of_measurement: "°C"
+    icon: "mdi:temperature-celsius"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: temperatureKRLF
+    name: Solar Temperatur Rücklauf
+    unit_of_measurement: "°C"
+    icon: "mdi:temperature-celsius"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: temperatureKVLF
+    name: Solar Temperatur Vorlauf
+    unit_of_measurement: "°C"
+    icon: "mdi:temperature-celsius"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  - platform: template
+    id: totalBurnerStart
+    name: Heizung Brenner Starts
+    icon: "mdi:meter-gas"
+    state_class: "total"
+    accuracy_decimals: 0
+
+  #- platform: template
+  #  id: burnerMinTimeCountdown
+  #  name: Heizung Brenner Countdown
+  #  unit_of_measurement: "°C"
+  #  icon: "mdi:temperature-celsius"
+  #  device_class: "temperature"
+  #  state_class: "total_increasing"
+  #  accuracy_decimals: 1
+
+
+binary_sensor:
+  - platform: template
+    id: burnerStatus
+    name: Heizung Brenner Status
+    icon: "mdi:meter-gas"
+    device_class: "running"
+
+
+text_sensor:
+  - platform: template
+    id: burnerMode
+    name: Heizung Brenner Modus
+    icon: "mdi:knob"
+
